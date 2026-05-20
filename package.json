@@ -1,0 +1,31 @@
+{
+  "name": "job-search-browser-service",
+  "version": "1.0.0",
+  "description": "AI Operations OS — Browser automation service (Browserbase + Playwright). PLATFORM PRIMITIVE: reusable browser service layer; Greenhouse adapter first.",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "dev": "ts-node src/index.ts",
+    "typecheck": "tsc --noEmit",
+    "clean": "rm -rf dist"
+  },
+  "dependencies": {
+    "@browserbasehq/sdk": "^2.0.0",
+    "axios": "^1.7.2",
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2",
+    "playwright-core": "^1.44.1",
+    "winston": "^3.13.0",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@types/express": "^4.17.21",
+    "@types/node": "^20.14.2",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.4.5"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  }
+}
