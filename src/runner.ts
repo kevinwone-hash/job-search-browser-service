@@ -39,7 +39,8 @@ export function isSessionActive(jobKey: string): boolean {
 export async function runSession(
   jobKey: string,
   workflowId: string,
-  atsUrlOverride?: string
+  atsUrlOverride?: string,
+  resumeUrlOverride?: string,
 ): Promise<void> {
   if (activeSessions.has(jobKey)) {
     logger.warn("session_already_active", { job_key: jobKey });
@@ -93,8 +94,15 @@ export async function runSession(
       locationCity: config.applicantLocationCity,
       locationState: config.applicantLocationState,
       locationCountry: config.applicantLocationCountry,
-      resumeUrl: config.resumeUrl,
+      // Use per-job tailored resume if provided; fall back to master resume from config
+      resumeUrl: resumeUrlOverride ?? config.resumeUrl,
     };
+
+    logger.info("resume_url_resolved", {
+      job_key: jobKey,
+      source: resumeUrlOverride ? "per_job_override" : "config_env_var",
+      url: applicant.resumeUrl ? applicant.resumeUrl.slice(0, 60) + "…" : "(none)",
+    });
 
     const ctx: RunContext = {
       jobKey,

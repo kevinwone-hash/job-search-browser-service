@@ -64,6 +64,9 @@ const RunRequestSchema = z.object({
   job_key: z.string().min(1),
   workflow_id: z.string().min(1),
   ats_url: z.string().url().optional(),
+  resume_url: z.string().url().optional(),
+  // Per-job tailored resume URL — overrides RESUME_URL env var for this session.
+  // Should be a public R2 URL pointing to the tailored DOCX for this job.
   auto_submit: z.boolean().default(false),
 });
 
@@ -77,7 +80,7 @@ app.post("/run", requireApiKey, (req: Request, res: Response) => {
     return;
   }
 
-  const { job_key, workflow_id, ats_url } = parsed.data;
+  const { job_key, workflow_id, ats_url, resume_url } = parsed.data;
 
   // Guard: prevent duplicate sessions
   if (isSessionActive(job_key)) {
@@ -92,7 +95,7 @@ app.post("/run", requireApiKey, (req: Request, res: Response) => {
   }
 
   // Fire the session asynchronously — do not await
-  runSession(job_key, workflow_id, ats_url).catch((err: unknown) => {
+  runSession(job_key, workflow_id, ats_url, resume_url).catch((err: unknown) => {
     logger.error("unhandled_session_error", {
       job_key,
       error: err instanceof Error ? err.message : String(err),
