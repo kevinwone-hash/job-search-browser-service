@@ -9,10 +9,11 @@
 
 import type { ATSAdapter } from "../types.js";
 import { GreenhouseAdapter } from "./greenhouse.js";
+import { LeverAdapter } from "./lever.js";
 
 const ADAPTERS: ATSAdapter[] = [
   new GreenhouseAdapter(),
-  // Future: new LeverAdapter(),
+  new LeverAdapter(),
   // Future: new WorkdayAdapter(),
   // Future: new IcimsCAdapter(),
 ];
