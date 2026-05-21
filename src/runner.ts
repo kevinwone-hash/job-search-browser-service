@@ -167,6 +167,11 @@ export async function runSession(
         metadata: { confirmation_url: result.confirmationUrl ?? null },
       });
 
+      // Update job status to "applied" so it leaves the /review Applied section
+      await _markJobApplied(jobKey).catch((e: unknown) => {
+        logger.warn("job_status_update_failed", { job_key: jobKey, error: String(e) });
+      });
+
       // Send Telegram confirmation with screenshot
       await _notifySubmitted(
         jobKey,
@@ -245,6 +250,20 @@ async function _notifySubmitted(
   }, { timeout: 10_000 }).catch((e: unknown) => {
     logger.warn("telegram_text_send_failed", { error: String(e) });
   });
+}
+
+async function _markJobApplied(jobKey: string): Promise<void> {
+  const apiUrl = config.jobSearchApiUrl;
+  const apiKey = config.jobSearchApiKey;
+  await axios.post(
+    `${apiUrl}/api/v1/jobs/${jobKey}/status`,
+    { status: "applied", note: "Auto-submitted by browser service" },
+    {
+      headers: { "x-api-key": apiKey, "content-type": "application/json" },
+      timeout: 10_000,
+    },
+  );
+  logger.info("job_status_marked_applied", { job_key: jobKey });
 }
 
 async function _notifyFailed(
