@@ -255,13 +255,11 @@ async function _notifyFailed(
   const chatId = process.env.TELEGRAM_CHAT_ID;
   if (!token || !chatId) return;
 
-  // Fetch workflow to get ATS URL and resume URL for manual fallback
+  // Fetch workflow to get ATS URL for manual fallback
   let atsUrl = "";
-  let resumeUrl = "";
   try {
     const workflow = await workflowClient.getWorkflow(jobKey);
     atsUrl = workflow.ats_url ?? "";
-    // resume_url is not on workflow state directly — include ATS URL for manual apply
   } catch {
     // ignore
   }
