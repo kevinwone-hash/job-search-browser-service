@@ -80,7 +80,7 @@ app.post("/run", requireApiKey, (req: Request, res: Response) => {
     return;
   }
 
-  const { job_key, workflow_id, ats_url, resume_url } = parsed.data;
+  const { job_key, workflow_id, ats_url, resume_url, auto_submit } = parsed.data;
 
   // Guard: prevent duplicate sessions
   if (isSessionActive(job_key)) {
@@ -95,7 +95,7 @@ app.post("/run", requireApiKey, (req: Request, res: Response) => {
   }
 
   // Fire the session asynchronously — do not await
-  runSession(job_key, workflow_id, ats_url, resume_url).catch((err: unknown) => {
+  runSession(job_key, workflow_id, ats_url, resume_url, auto_submit).catch((err: unknown) => {
     logger.error("unhandled_session_error", {
       job_key,
       error: err instanceof Error ? err.message : String(err),

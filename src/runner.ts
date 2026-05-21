@@ -13,6 +13,7 @@
  * it was triggered by Make.com, Temporal, or a direct HTTP call.
  */
 
+import axios from "axios";
 import { createBrowserSession } from "./browser-session.js";
 import { WorkflowClient } from "./workflow-client.js";
 import { adapterRegistry } from "./adapters/registry.js";
@@ -41,6 +42,7 @@ export async function runSession(
   workflowId: string,
   atsUrlOverride?: string,
   resumeUrlOverride?: string,
+  autoSubmit: boolean = false,
 ): Promise<void> {
   if (activeSessions.has(jobKey)) {
     logger.warn("session_already_active", { job_key: jobKey });
@@ -109,6 +111,7 @@ export async function runSession(
       workflowId,
       atsUrl,
       applicant,
+      autoSubmit,
 
       onStepStart: async (step: StepName) => {
         currentStep = step;
@@ -158,19 +161,21 @@ export async function runSession(
         job_key: jobKey,
         confirmation_url: result.confirmationUrl,
       });
-      // Mark the submit and confirm steps as complete
       await workflowClient.reportStep(jobKey, "submit", "completed");
-      if (result.confirmationUrl) {
-        await workflowClient.reportStep(jobKey, "confirm", "completed", {
-          screenshotUrl: result.confirmationScreenshotUrl,
-          metadata: { confirmation_url: result.confirmationUrl },
-        });
-      }
+      await workflowClient.reportStep(jobKey, "confirm", "completed", {
+        screenshotUrl: result.confirmationScreenshotUrl,
+        metadata: { confirmation_url: result.confirmationUrl ?? null },
+      });
+
+      // Send Telegram confirmation with screenshot
+      await _notifySubmitted(
+        jobKey,
+        result.confirmationScreenshotUrl,
+        result.confirmationUrl,
+      );
     } else if (result.awaitingApproval) {
       logger.info("session_paused_awaiting_approval", { job_key: jobKey });
-      // Already reported via onReviewCheckpoint — nothing more to do here.
-      // Session stays open in Browserbase until Kevin approves and
-      // a second runSession call is made with auto_submit=true.
+      // review_checkpoint already reported via onReviewCheckpoint callback.
     }
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
@@ -187,6 +192,9 @@ export async function runSession(
     }
 
     await workflowClient.reportFailure(jobKey, message, currentStep, screenshotUrl);
+
+    // Notify failure — include ATS URL and resume link so Kevin can apply manually
+    await _notifyFailed(jobKey, message);
   } finally {
     activeSessions.delete(jobKey);
     if (session) {
@@ -194,4 +202,88 @@ export async function runSession(
     }
     logger.info("session_complete", { job_key: jobKey });
   }
+}
+
+// ── Telegram notification helpers ──────────────────────────────────────────
+
+async function _notifySubmitted(
+  jobKey: string,
+  screenshotDataUri?: string,
+  confirmationUrl?: string,
+): Promise<void> {
+  const token = process.env.TELEGRAM_BOT_TOKEN;
+  const chatId = process.env.TELEGRAM_CHAT_ID;
+  if (!token || !chatId) return;
+
+  const base = `https://api.telegram.org/bot${token}`;
+
+  // If we have a screenshot, send it as a photo with caption
+  if (screenshotDataUri && screenshotDataUri.startsWith("data:image/png;base64,")) {
+    try {
+      const b64 = screenshotDataUri.replace("data:image/png;base64,", "");
+      const buf = Buffer.from(b64, "base64");
+      // Native FormData + Blob available in Node 20+
+      const form = new globalThis.FormData();
+      form.set("chat_id", chatId);
+      form.set("caption", `✅ <b>Application submitted</b>\n\nJob: ${jobKey.slice(0, 16)}…${confirmationUrl ? `\n\n<a href="${confirmationUrl}">View confirmation →</a>` : ""}`);
+      form.set("parse_mode", "HTML");
+      form.set("photo", new globalThis.Blob([buf], { type: "image/png" }), "confirmation.png");
+      await axios.post(`${base}/sendPhoto`, form, { timeout: 15_000 });
+      return;
+    } catch (err) {
+      logger.warn("telegram_photo_send_failed", { error: String(err) });
+      // Fall through to text message
+    }
+  }
+
+  // Fallback: text only
+  await axios.post(`${base}/sendMessage`, {
+    chat_id: chatId,
+    text: `✅ <b>Application submitted</b>\n\nJob: <code>${jobKey.slice(0, 16)}…</code>${confirmationUrl ? `\n\n<a href="${confirmationUrl}">View confirmation →</a>` : ""}`,
+    parse_mode: "HTML",
+    disable_web_page_preview: false,
+  }, { timeout: 10_000 }).catch((e: unknown) => {
+    logger.warn("telegram_text_send_failed", { error: String(e) });
+  });
+}
+
+async function _notifyFailed(
+  jobKey: string,
+  errorMessage: string,
+): Promise<void> {
+  const token = process.env.TELEGRAM_BOT_TOKEN;
+  const chatId = process.env.TELEGRAM_CHAT_ID;
+  if (!token || !chatId) return;
+
+  // Fetch workflow to get ATS URL and resume URL for manual fallback
+  let atsUrl = "";
+  let resumeUrl = "";
+  try {
+    const workflow = await workflowClient.getWorkflow(jobKey);
+    atsUrl = workflow.ats_url ?? "";
+    // resume_url is not on workflow state directly — include ATS URL for manual apply
+  } catch {
+    // ignore
+  }
+
+  const manualLink = atsUrl ? `\n\n<a href="${atsUrl}">Apply manually →</a>` : "";
+  const message =
+    `⚠️ <b>Auto-apply failed</b>\n\n` +
+    `Job: <code>${jobKey.slice(0, 16)}…</code>\n` +
+    `Error: ${errorMessage.slice(0, 200)}` +
+    manualLink +
+    `\n\nYour tailored resume is in R2. Check /review to download it.`;
+
+  await axios.post(
+    `https://api.telegram.org/bot${token}/sendMessage`,
+    {
+      chat_id: chatId,
+      text: message,
+      parse_mode: "HTML",
+      disable_web_page_preview: true,
+    },
+    { timeout: 10_000 },
+  ).catch((e: unknown) => {
+    logger.warn("telegram_failure_notify_failed", { error: String(e) });
+  });
 }

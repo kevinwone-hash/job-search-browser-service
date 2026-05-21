@@ -94,7 +94,27 @@ export class LeverAdapter implements ATSAdapter {
       throw err;
     }
 
-    // ── Step 5: Review checkpoint ─────────────────────────────────────────
+    // ── Step 5: Submit or pause at review checkpoint ──────────────────────
+    if (ctx.autoSubmit) {
+      // Auto-submit: click submit, wait for confirmation, screenshot it
+      await ctx.onStepStart("submit");
+      try {
+        const { confirmationUrl, confirmationScreenshot } = await this._submitForm(page, ctx);
+        await ctx.onStepComplete("submit", await this._screenshot(page));
+        return {
+          submitted: true,
+          confirmationUrl,
+          confirmationScreenshotUrl: confirmationScreenshot,
+        };
+      } catch (err) {
+        const msg = toMessage(err);
+        const screenshot = await this._screenshot(page).catch(() => undefined);
+        await ctx.onStepFail("submit", msg, screenshot);
+        throw err;
+      }
+    }
+
+    // Pause at review checkpoint — Kevin approves before submission
     await ctx.onStepStart("review_checkpoint");
     const reviewScreenshot = await this._screenshot(page);
     const formData = await this._captureFormData(page);
@@ -317,6 +337,65 @@ export class LeverAdapter implements ATSAdapter {
       );
     }
     return false;
+  }
+
+  private async _submitForm(
+    page: Page,
+    _ctx: RunContext,
+  ): Promise<{ confirmationUrl: string; confirmationScreenshot: string }> {
+    // Find and click the Lever submit button
+    const submitSelectors = [
+      "button[type='submit']",
+      "button.postings-btn[type='submit']",
+      "button[data-qa='btn-submit']",
+      "input[type='submit']",
+    ];
+
+    let clicked = false;
+    for (const sel of submitSelectors) {
+      const btn = await page.$(sel);
+      if (btn) {
+        await btn.click();
+        clicked = true;
+        break;
+      }
+    }
+
+    if (!clicked) {
+      throw new Error("Submit button not found on Lever form");
+    }
+
+    // Wait for confirmation page — Lever redirects to a thank-you page
+    // or shows a success message after submission
+    await page.waitForFunction(
+      () => {
+        const url = window.location.href;
+        const body = document.body.innerText.toLowerCase();
+        return (
+          url.includes("confirmation") ||
+          url.includes("thank") ||
+          body.includes("application has been submitted") ||
+          body.includes("thanks for applying") ||
+          body.includes("thank you for applying") ||
+          body.includes("successfully submitted") ||
+          body.includes("we've received your application")
+        );
+      },
+      { timeout: 30_000 },
+    ).catch(() => {
+      // If the check times out, we still take a screenshot — form may have submitted
+      logger.warn("lever_confirmation_check_timed_out");
+    });
+
+    // Brief pause to let the page fully render
+    await page.waitForTimeout(2000);
+
+    const confirmationUrl = page.url();
+    const confirmationScreenshot = await this._screenshot(page);
+
+    logger.info("lever_form_submitted", { confirmation_url: confirmationUrl });
+
+    return { confirmationUrl, confirmationScreenshot };
   }
 
   private async _screenshot(page: Page): Promise<string> {

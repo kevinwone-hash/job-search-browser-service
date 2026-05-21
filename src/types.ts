@@ -87,6 +87,8 @@ export interface RunContext {
   workflowId: string;
   atsUrl: string;
   applicant: ApplicantProfile;
+  /** If true, submit the form automatically after filling. No review checkpoint pause. */
+  autoSubmit: boolean;
   onStepStart: (step: StepName) => Promise<void>;
   onStepComplete: (step: StepName, screenshotUrl?: string) => Promise<void>;
   onStepFail: (step: StepName, error: string, screenshotUrl?: string) => Promise<void>;
