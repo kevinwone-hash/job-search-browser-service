@@ -99,4 +99,19 @@ export class WorkflowClient {
       browser_session_id: browserSessionId,
     });
   }
+
+  /**
+   * Fetch application materials for a job — resume URL, cover letter URL, ATS URL.
+   * Used by failure notifications to include direct download links in Telegram.
+   */
+  async getJobMaterials(jobKey: string): Promise<{
+    company: string | null;
+    title: string | null;
+    ats_url: string | null;
+    resume_url: string | null;
+    cover_letter_url: string | null;
+  }> {
+    const res = await this.http.get(`/api/v1/jobs/${jobKey}/materials`);
+    return res.data;
+  }
 }

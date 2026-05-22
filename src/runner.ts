@@ -274,22 +274,45 @@ async function _notifyFailed(
   const chatId = process.env.TELEGRAM_CHAT_ID;
   if (!token || !chatId) return;
 
-  // Fetch workflow to get ATS URL for manual fallback
+  // Fetch job materials — resume, cover letter, ATS URL, company, title
+  let company = "";
+  let title = "";
   let atsUrl = "";
+  let resumeUrl = "";
+  let coverLetterUrl = "";
+
   try {
-    const workflow = await workflowClient.getWorkflow(jobKey);
-    atsUrl = workflow.ats_url ?? "";
+    const materials = await workflowClient.getJobMaterials(jobKey);
+    company = materials.company ?? "";
+    title = materials.title ?? "";
+    atsUrl = materials.ats_url ?? "";
+    resumeUrl = materials.resume_url ?? "";
+    coverLetterUrl = materials.cover_letter_url ?? "";
   } catch {
-    // ignore
+    // ignore — send notification with what we have
   }
 
-  const manualLink = atsUrl ? `\n\n<a href="${atsUrl}">Apply manually →</a>` : "";
+  const reviewUrl = `${config.jobSearchApiUrl}/review`;
+  const isNoAdapter = errorMessage.includes("No adapter found");
+
+  const header = isNoAdapter
+    ? `⚠️ <b>No ATS adapter — apply manually</b>`
+    : `⚠️ <b>Auto-apply failed</b>`;
+
+  const roleLines = title && company
+    ? `\n\n<b>${title}</b>\nat ${company}`
+    : `\n\nJob: <code>${jobKey.slice(0, 16)}…</code>`;
+
+  const resumeLine = resumeUrl ? `\n\n⬇ <a href="${resumeUrl}">Tailored resume</a>` : "";
+  const clLine = coverLetterUrl ? `\n⬇ <a href="${coverLetterUrl}">Cover letter</a>` : "";
+  const atsLine = atsUrl ? `\n🔗 <a href="${atsUrl}">Apply here →</a>` : "";
+  const errorLine = isNoAdapter ? "" : `\n\nError: <code>${errorMessage.slice(0, 150)}</code>`;
+
   const message =
-    `⚠️ <b>Auto-apply failed</b>\n\n` +
-    `Job: <code>${jobKey.slice(0, 16)}…</code>\n` +
-    `Error: ${errorMessage.slice(0, 200)}` +
-    manualLink +
-    `\n\nYour tailored resume is in R2. Check /review to download it.`;
+    `${header}${roleLines}` +
+    `${resumeLine}${clLine}${atsLine}` +
+    `${errorLine}` +
+    `\n\n📋 <a href="${reviewUrl}">Open /review →</a>`;
 
   await axios.post(
     `https://api.telegram.org/bot${token}/sendMessage`,
