@@ -10,12 +10,13 @@
 import type { ATSAdapter } from "../types.js";
 import { GreenhouseAdapter } from "./greenhouse.js";
 import { LeverAdapter } from "./lever.js";
+import { WorkdayAdapter } from "./workday.js";
 
 const ADAPTERS: ATSAdapter[] = [
   new GreenhouseAdapter(),
   new LeverAdapter(),
-  // Future: new WorkdayAdapter(),
-  // Future: new IcimsCAdapter(),
+  new WorkdayAdapter(),  // Decision 42 — proactive build authorized 2026-05-27
+  // Future: new IcimsAdapter(),
 ];
 
 export const adapterRegistry = {
