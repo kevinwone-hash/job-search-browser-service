@@ -132,7 +132,13 @@ app.get("/discovery/status", (_req: Request, res: Response) => {
   res.json({ active: activeDiscoveryRun });
 });
 
-app.post("/discovery/run", requireApiKey, (_req: Request, res: Response) => {
+const DiscoveryRunRequestSchema = z.object({
+  // Optional diagnostic override — runs only these queries instead of DISCOVERY_QUERIES.
+  // Use for single-query extraction diagnostics without touching the production query set.
+  diagnostic_queries: z.array(z.string().min(1)).optional(),
+});
+
+app.post("/discovery/run", requireApiKey, (req: Request, res: Response) => {
   if (activeDiscoveryRun) {
     const response: DiscoveryRunResponse = {
       runId: "",
@@ -143,11 +149,18 @@ app.post("/discovery/run", requireApiKey, (_req: Request, res: Response) => {
     return;
   }
 
+  const parsed = DiscoveryRunRequestSchema.safeParse(req.body);
+  if (!parsed.success) {
+    res.status(422).json({ error: "Invalid request", details: parsed.error.errors });
+    return;
+  }
+
   const runId = `dr_${Date.now().toString(36)}`;
+  const { diagnostic_queries } = parsed.data;
   activeDiscoveryRun = true;
 
   // Fire async — do not await. Mirrors the /run pattern for ATS sessions.
-  runDiscovery(runId)
+  runDiscovery(runId, diagnostic_queries)
     .catch((err: unknown) => {
       logger.error("unhandled_discovery_error", {
         run_id: runId,
@@ -159,12 +172,18 @@ app.post("/discovery/run", requireApiKey, (_req: Request, res: Response) => {
       logger.info("discovery_run_flag_cleared", { run_id: runId });
     });
 
-  logger.info("discovery_run_triggered", { run_id: runId });
+  logger.info("discovery_run_triggered", {
+    run_id: runId,
+    diagnostic: !!diagnostic_queries,
+    query_count: diagnostic_queries?.length ?? "production",
+  });
 
   const response: DiscoveryRunResponse = {
     runId,
     status: "started",
-    message: "Discovery run started. Monitor via GET /discovery/status and platform_state keys.",
+    message: diagnostic_queries
+      ? `Diagnostic run started (${diagnostic_queries.length} quer${diagnostic_queries.length === 1 ? "y" : "ies"}). Monitor via GET /discovery/status and Railway logs.`
+      : "Discovery run started. Monitor via GET /discovery/status and platform_state keys.",
   };
   res.status(202).json(response);
 });

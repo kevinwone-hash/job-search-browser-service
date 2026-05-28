@@ -55,26 +55,51 @@ const ingestClient = new DiscoveryIngestClient();
  * Called by POST /discovery/run in index.ts.
  * Never throws — all errors are caught and logged.
  */
-export async function runDiscovery(runId: string): Promise<DiscoveryRunRecord> {
+/**
+ * @param runId            Short identifier for log correlation.
+ * @param diagnosticQueries  Optional override query list. When set, replaces
+ *                         DISCOVERY_QUERIES for this run only. State keys and
+ *                         Telegram notification are skipped — Railway logs are
+ *                         the sole output. Use for single-query SERP recon.
+ */
+export async function runDiscovery(
+  runId: string,
+  diagnosticQueries?: readonly string[],
+): Promise<DiscoveryRunRecord> {
+  const queries = diagnosticQueries ?? DISCOVERY_QUERIES;
+  const isDiagnostic = !!diagnosticQueries;
+
   const startedAt = new Date().toISOString();
-  logger.info("discovery_run_starting", { run_id: runId, queries: DISCOVERY_QUERIES.length });
+  logger.info("discovery_run_starting", {
+    run_id: runId,
+    queries: queries.length,
+    diagnostic: isDiagnostic,
+    query_list: queries,
+  });
 
   const queryResults: DiscoveryQueryResult[] = [];
   let session = null;
 
   try {
     session = await createBrowserSession();
-    const { page } = session;
+    const { page, sessionId } = session;
 
-    for (let i = 0; i < DISCOVERY_QUERIES.length; i++) {
-      const query = DISCOVERY_QUERIES[i];
+    // Log Browserbase session for replay/screenshot access in dashboard
+    logger.info("discovery_browserbase_session", {
+      run_id: runId,
+      session_id: sessionId,
+      replay_url: `https://www.browserbase.com/sessions/${sessionId}`,
+    });
+
+    for (let i = 0; i < queries.length; i++) {
+      const query = queries[i];
 
       // Decision 46: minimum inter-query delay (skip before first query)
       if (i > 0) {
         await page.waitForTimeout(MIN_INTER_QUERY_DELAY_MS);
       }
 
-      const result = await _runQuery(page, query, runId);
+      const result = await _runQuery(page, query, runId, isDiagnostic);
       queryResults.push(result);
 
       logger.info("discovery_query_complete", {
@@ -111,11 +136,18 @@ export async function runDiscovery(runId: string): Promise<DiscoveryRunRecord> {
 
   logger.info("discovery_run_complete", {
     run_id: runId,
+    diagnostic: isDiagnostic,
     total_seen: record.totalJobsSeen,
     total_matched: record.totalTitleMatched,
     total_dropped: record.totalTitleDropped,
     duration_ms: Date.now() - new Date(startedAt).getTime(),
   });
+
+  // Diagnostic runs skip ingest + state writes — logs are the sole output
+  if (isDiagnostic) {
+    logger.info("discovery_diagnostic_complete_skipping_ingest", { run_id: runId });
+    return record;
+  }
 
   // --- POST to job-search-os /ingest/discovery ---
   const allMatchedJobs = queryResults.flatMap((r) => r.matchedJobs);
@@ -151,6 +183,7 @@ async function _runQuery(
   page: Page,
   query: string,
   runId: string,
+  isDiagnostic: boolean = false,
 ): Promise<DiscoveryQueryResult> {
   const result: DiscoveryQueryResult = {
     query,
@@ -184,6 +217,11 @@ async function _runQuery(
         query,
         hint: "No known card selectors visible — attempting JSON-LD extraction anyway",
       });
+    }
+
+    // Diagnostic: log page state to determine extraction failure root cause
+    if (isDiagnostic) {
+      await _logPageDiagnostics(page, query, runId);
     }
 
     // --- Primary: JSON-LD extraction ---
@@ -445,6 +483,115 @@ async function _extractFromDom(page: Page, query: string): Promise<DiscoveredJob
 
     return jobs;
   }, query);
+}
+
+// ---------------------------------------------------------------------------
+// Diagnostic page state logger
+// ---------------------------------------------------------------------------
+
+/**
+ * Logs detailed page state after navigation + settle to diagnose extraction failures.
+ *
+ * Captures in a single page.evaluate() call to minimize round-trips:
+ *   - Current URL + page title (detect consent pages, bot interstitials, redirects)
+ *   - Body text first 500 chars (detect blank page, error page, CAPTCHA text)
+ *   - JSON-LD script count + @types present (detect whether Google embeds structured data)
+ *   - Card selector hit counts (detect whether job cards rendered)
+ *   - Iframe count + any shadow roots on body children (detect SPA containment patterns)
+ *   - Any element with text "consent", "cookie", "verify", "captcha" (detect interstitials)
+ */
+async function _logPageDiagnostics(page: Page, query: string, runId: string): Promise<void> {
+  try {
+    const diag = await page.evaluate(() => {
+      // Current URL and title
+      const currentUrl = window.location.href;
+      const pageTitle = document.title;
+
+      // Body text — first 500 chars
+      const bodyText = (document.body?.innerText ?? "").slice(0, 500).replace(/\s+/g, " ").trim();
+
+      // JSON-LD scripts
+      const jsonLdScripts = Array.from(
+        document.querySelectorAll<HTMLScriptElement>('script[type="application/ld+json"]'),
+      );
+      const jsonLdCount = jsonLdScripts.length;
+      const jsonLdTypes: string[] = [];
+      for (const s of jsonLdScripts) {
+        try {
+          const parsed = JSON.parse(s.textContent ?? "");
+          const t = (parsed as Record<string, unknown>)?.["@type"];
+          if (t) jsonLdTypes.push(String(t));
+        } catch {
+          jsonLdTypes.push("parse_error");
+        }
+      }
+
+      // Card selector counts — test each independently
+      const cardSelectors: Record<string, number> = {
+        "li[data-jk]": document.querySelectorAll("li[data-jk]").length,
+        ".iFjolb": document.querySelectorAll(".iFjolb").length,
+        '[jsname="MZArnb"] li': document.querySelectorAll('[jsname="MZArnb"] li').length,
+        ".gjrt": document.querySelectorAll(".gjrt").length,
+        // Additional broad selectors for diagnostics
+        '[data-ved][data-rc]': document.querySelectorAll("[data-ved][data-rc]").length,
+        'div[class*="job"]': document.querySelectorAll('div[class*="job"]').length,
+        'li[class*="job"]': document.querySelectorAll('li[class*="job"]').length,
+      };
+
+      // Iframe count
+      const iframeCount = document.querySelectorAll("iframe").length;
+
+      // Shadow roots on body children (rare but possible SPA pattern)
+      const shadowRootCount = Array.from(document.body?.children ?? []).filter(
+        (el) => el.shadowRoot !== null,
+      ).length;
+
+      // Interstitial detection — text patterns that indicate bot/consent pages
+      const bodyLower = (document.body?.innerText ?? "").toLowerCase();
+      const interstitialHints: string[] = [];
+      if (bodyLower.includes("consent")) interstitialHints.push("consent");
+      if (bodyLower.includes("cookie")) interstitialHints.push("cookie");
+      if (bodyLower.includes("captcha")) interstitialHints.push("captcha");
+      if (bodyLower.includes("verify you are human")) interstitialHints.push("human_verify");
+      if (bodyLower.includes("unusual traffic")) interstitialHints.push("unusual_traffic");
+      if (bodyLower.includes("before you continue")) interstitialHints.push("before_you_continue");
+      if (bodyLower.includes("sign in")) interstitialHints.push("sign_in");
+
+      return {
+        currentUrl,
+        pageTitle,
+        bodyText,
+        jsonLdCount,
+        jsonLdTypes,
+        cardSelectors,
+        iframeCount,
+        shadowRootCount,
+        interstitialHints,
+        totalElements: document.querySelectorAll("*").length,
+      };
+    });
+
+    logger.info("discovery_query_page_diagnostic", {
+      run_id: runId,
+      query,
+      current_url: diag.currentUrl,
+      page_title: diag.pageTitle,
+      body_text_preview: diag.bodyText,
+      json_ld_count: diag.jsonLdCount,
+      json_ld_types: diag.jsonLdTypes,
+      card_selectors: diag.cardSelectors,
+      iframe_count: diag.iframeCount,
+      shadow_root_count: diag.shadowRootCount,
+      interstitial_hints: diag.interstitialHints,
+      total_elements: diag.totalElements,
+    });
+  } catch (err) {
+    logger.warn("discovery_query_diagnostic_failed", {
+      run_id: runId,
+      query,
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
 }
 
 // ---------------------------------------------------------------------------
