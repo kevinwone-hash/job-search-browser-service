@@ -6,10 +6,12 @@
  * and the session runs in the background.
  *
  * Routes:
- *   GET  /health       → health check (public)
- *   POST /run          → trigger a browser session for a job
- *   GET  /sessions     → list currently active sessions
- *   GET  /adapters     → list registered ATS adapters
+ *   GET  /health            → health check (public)
+ *   POST /run               → trigger a browser session for a job (ATS form fill)
+ *   GET  /sessions          → list currently active sessions
+ *   GET  /adapters          → list registered ATS adapters
+ *   POST /discovery/run     → trigger a Google Jobs discovery run (Decision 44)
+ *   GET  /discovery/status  → check if a discovery run is currently active (public)
  */
 
 import express, { Request, Response, NextFunction } from "express";
@@ -18,7 +20,9 @@ import { config } from "./config.js";
 import { logger } from "./logger.js";
 import { runSession, isSessionActive } from "./runner.js";
 import { adapterRegistry } from "./adapters/registry.js";
+import { runDiscovery } from "./discovery/google-jobs-runner.js";
 import type { RunResponse } from "./types.js";
+import type { DiscoveryRunResponse } from "./discovery/types.js";
 
 const app = express();
 app.use(express.json());
@@ -109,6 +113,58 @@ app.post("/run", requireApiKey, (req: Request, res: Response) => {
     workflow_id,
     status: "started",
     message: "Browser session started. Monitor progress via the workflow API.",
+  };
+  res.status(202).json(response);
+});
+
+// ── Google Jobs discovery (Decision 44) ───────────────────────────────────
+//
+// Decision 46: max 2 runs/day/domain — enforced by APScheduler on job-search-os.
+// The activeDiscoveryRun guard here prevents stacked concurrent runs if the
+// scheduler fires twice (e.g., Railway restart + scheduled fire).
+//
+// APScheduler is DISABLED until a manual end-to-end validation run confirms
+// the full pipeline: /discovery/run → Browserbase → /ingest/discovery → /review.
+
+let activeDiscoveryRun = false;
+
+app.get("/discovery/status", (_req: Request, res: Response) => {
+  res.json({ active: activeDiscoveryRun });
+});
+
+app.post("/discovery/run", requireApiKey, (_req: Request, res: Response) => {
+  if (activeDiscoveryRun) {
+    const response: DiscoveryRunResponse = {
+      runId: "",
+      status: "already_running",
+      message: "A discovery run is already in progress — try again after it completes",
+    };
+    res.status(409).json(response);
+    return;
+  }
+
+  const runId = `dr_${Date.now().toString(36)}`;
+  activeDiscoveryRun = true;
+
+  // Fire async — do not await. Mirrors the /run pattern for ATS sessions.
+  runDiscovery(runId)
+    .catch((err: unknown) => {
+      logger.error("unhandled_discovery_error", {
+        run_id: runId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    })
+    .finally(() => {
+      activeDiscoveryRun = false;
+      logger.info("discovery_run_flag_cleared", { run_id: runId });
+    });
+
+  logger.info("discovery_run_triggered", { run_id: runId });
+
+  const response: DiscoveryRunResponse = {
+    runId,
+    status: "started",
+    message: "Discovery run started. Monitor via GET /discovery/status and platform_state keys.",
   };
   res.status(202).json(response);
 });
