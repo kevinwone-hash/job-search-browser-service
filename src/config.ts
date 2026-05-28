@@ -37,6 +37,10 @@ const configSchema = z.object({
 
   // Resume URL (must be publicly accessible for Browserbase to upload)
   resumeUrl: z.string().default(""),
+
+  // Anthropic API key — optional. Used by Decision 8 V2 vision evaluator.
+  // If absent, confirmation detection falls back to V1 text/URL heuristic.
+  anthropicApiKey: z.string().optional(),
 });
 
 function loadConfig() {
@@ -57,6 +61,7 @@ function loadConfig() {
     applicantLocationState: process.env.APPLICANT_LOCATION_STATE,
     applicantLocationCountry: process.env.APPLICANT_LOCATION_COUNTRY,
     resumeUrl: process.env.RESUME_URL,
+    anthropicApiKey: process.env.ANTHROPIC_API_KEY,
   });
 
   if (!result.success) {

@@ -33,10 +33,12 @@
  * config and replace _evaluateConfirmation() body.
  */
 
+import Anthropic from "@anthropic-ai/sdk";
 import axios from "axios";
 import path from "path";
 import type { Page } from "playwright-core";
 import type { ATSAdapter, AdapterResult, RunContext } from "../types.js";
+import { config } from "../config.js";
 import { logger } from "../logger.js";
 
 // ── Workday section names (from section heading detection) ─────────────────
@@ -852,9 +854,8 @@ export class WorkdayAdapter implements ATSAdapter {
     const confirmationUrl = page.url();
     const confirmationScreenshot = await this._screenshot(page);
 
-    // Decision 8 V1: visual check via page text
-    // V2: replace with Claude Haiku vision API call
-    const confirmed = await this._evaluateConfirmation(page);
+    // Decision 8 V2: Claude Haiku vision eval (falls back to V1 text heuristic)
+    const confirmed = await this._evaluateConfirmation(page, confirmationScreenshot, ctx.jobKey);
 
     if (!confirmed) {
       throw new Error(
@@ -878,11 +879,88 @@ export class WorkdayAdapter implements ATSAdapter {
   /**
    * Evaluate whether the current page shows a genuine submission confirmation.
    *
-   * Decision 8 V1: text-based heuristic.
-   * V2 upgrade: call Claude Haiku vision API with the page screenshot.
+   * Decision 8 V2: Claude Haiku vision evaluation of the confirmation screenshot.
    * Conservative bias: only returns true on unambiguous confirmation signals.
+   * Ambiguous screenshots are treated as not-submitted (false positive prevention).
+   *
+   * Fallback chain:
+   *   1. If ANTHROPIC_API_KEY is set → Claude Haiku vision evaluation (V2)
+   *   2. If key is absent or vision call fails → V1 text/URL heuristic
+   *
+   * Authority note: this method returns a claim only. job-search-os remains
+   * the authoritative source for committed submitted state — the browser-service
+   * returns submitted_claim + screenshot evidence and job-search-os decides
+   * whether to write the final 'submitted' status to the DB.
    */
-  private async _evaluateConfirmation(page: Page): Promise<boolean> {
+  private async _evaluateConfirmation(
+    page: Page,
+    screenshotDataUri?: string,
+    jobKey?: string,
+  ): Promise<boolean> {
+    // ── V2: Claude Haiku vision evaluation ──────────────────────────────────
+    if (config.anthropicApiKey && screenshotDataUri) {
+      try {
+        const client = new Anthropic({ apiKey: config.anthropicApiKey });
+        const base64 = screenshotDataUri.replace(/^data:image\/png;base64,/, "");
+
+        const message = await client.messages.create({
+          model: "claude-haiku-4-5-20251001",
+          max_tokens: 64,
+          messages: [
+            {
+              role: "user",
+              content: [
+                {
+                  type: "image",
+                  source: { type: "base64", media_type: "image/png", data: base64 },
+                },
+                {
+                  type: "text",
+                  text: (
+                    "This is a screenshot from a job application flow. " +
+                    "Did the application submit successfully? " +
+                    "Reply with exactly: SUBMITTED <reason> or UNCERTAIN <reason>. " +
+                    "Only say SUBMITTED if there is unambiguous confirmation — " +
+                    "e.g. a confirmation number, 'Thank you for applying', " +
+                    "'Your application has been submitted', or a dedicated confirmation page. " +
+                    "If the page shows a form, an error, a login wall, or is ambiguous, say UNCERTAIN."
+                  ),
+                },
+              ],
+            },
+          ],
+        });
+
+        const raw = ((message.content[0] as { type: string; text: string }).text ?? "").trim();
+        const verdict = raw.toUpperCase().startsWith("SUBMITTED");
+        const reason = raw.slice(raw.indexOf(" ") + 1).trim().slice(0, 200);
+
+        logger.info("workday_vision_eval", {
+          job_key: jobKey ?? "unknown",
+          verdict: verdict ? "SUBMITTED" : "UNCERTAIN",
+          reason,
+          model: "claude-haiku-4-5-20251001",
+          eval_version: "v2",
+        });
+
+        return verdict;
+      } catch (err) {
+        // Vision call failed — log and fall through to V1 heuristic
+        logger.warn("workday_vision_eval_failed", {
+          job_key: jobKey ?? "unknown",
+          error: String(err),
+          fallback: "v1_heuristic",
+        });
+      }
+    }
+
+    // ── V1 fallback: text/URL heuristic ─────────────────────────────────────
+    logger.info("workday_vision_eval", {
+      job_key: jobKey ?? "unknown",
+      eval_version: "v1_heuristic",
+      reason: config.anthropicApiKey ? "vision_call_failed" : "no_anthropic_key",
+    });
+
     return page.evaluate(() => {
       const body = document.body.innerText.toLowerCase();
       const url = window.location.href.toLowerCase();

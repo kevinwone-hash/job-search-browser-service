@@ -11,6 +11,7 @@
     "clean": "rm -rf dist"
   },
   "dependencies": {
+    "@anthropic-ai/sdk": "^0.100.0",
     "@browserbasehq/sdk": "^2.0.0",
     "axios": "^1.7.2",
     "dotenv": "^16.4.5",
