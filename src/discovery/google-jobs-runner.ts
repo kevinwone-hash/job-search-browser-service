@@ -268,8 +268,10 @@ async function _runQuery(
   let pageState: DiagnosticPageState | null = null;
 
   try {
-    // Navigate to Google Jobs SERP
-    const url = googleJobsUrl(query);
+    // Navigate to Google Jobs SERP.
+    // In diagnostic mode, the "query" may be a full URL — use it directly.
+    // In production, always use googleJobsUrl() to enforce the canonical URL format.
+    const url = (isDiagnostic && query.startsWith("https://")) ? query : googleJobsUrl(query);
     logger.info("discovery_query_navigating", { run_id: runId, query, url });
 
     await page.goto(url, { waitUntil: "domcontentloaded", timeout: 30_000 });
