@@ -133,14 +133,37 @@ app.get("/discovery/status", (_req: Request, res: Response) => {
 });
 
 // Returns the in-memory result of the most recent diagnostic run (public).
-// null if no diagnostic run has been executed since last deploy.
+// currentUrl and bodyText are omitted — they contain Google query strings that
+// trip the Chrome MCP content filter. All diagnostic signal fields are preserved.
 app.get("/discovery/last-diagnostic", (_req: Request, res: Response) => {
   const result = getLastDiagnostic();
   if (!result) {
     res.status(404).json({ error: "No diagnostic run has been executed since last deploy." });
     return;
   }
-  res.json(result);
+
+  // Strip fields containing raw URLs / body text before serialising
+  const safe = {
+    ...result,
+    queries: result.queries.map((q) => ({
+      ...q,
+      pageState: q.pageState
+        ? {
+            pageTitle: q.pageState.pageTitle,
+            jsonLdCount: q.pageState.jsonLdCount,
+            jsonLdTypes: q.pageState.jsonLdTypes,
+            cardSelectors: q.pageState.cardSelectors,
+            iframeCount: q.pageState.iframeCount,
+            shadowRootCount: q.pageState.shadowRootCount,
+            interstitialHints: q.pageState.interstitialHints,
+            totalElements: q.pageState.totalElements,
+            // currentUrl and bodyText omitted — contain query strings
+          }
+        : null,
+    })),
+  };
+
+  res.json(safe);
 });
 
 const DiscoveryRunRequestSchema = z.object({
