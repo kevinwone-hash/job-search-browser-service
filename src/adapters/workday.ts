@@ -169,12 +169,43 @@ export class WorkdayAdapter implements ATSAdapter {
   }
 
   async run(page: Page, ctx: RunContext): Promise<AdapterResult> {
+    // ── URL normalisation ───────────────────────────────────────────────────
+    // Strip non-wizard suffixes before navigating. Workday's /applyManually
+    // path renders a static "manual application" page with no wizard DOM —
+    // navigating to it would cause _clickNext() to fail on every step.
+    // Normalise to the standard /apply entry point instead.
+    const normaliseUrl = (url: string): string => {
+      // /apply/applyManually → /apply
+      if (url.includes("/apply/applyManually")) {
+        const normalised = url.replace(/\/apply\/applyManually.*$/, "/apply");
+        logger.warn("workday_url_normalised", {
+          original: url,
+          normalised,
+          reason: "/applyManually suffix stripped — not a wizard URL",
+        });
+        return normalised;
+      }
+      // Bare job listing URL (no /apply suffix) — append /apply
+      // Matches: …/job/{slug} but not …/job/{slug}/apply*
+      if (/\/job\/[^/]+$/.test(url)) {
+        const normalised = url + "/apply";
+        logger.info("workday_url_normalised", {
+          original: url,
+          normalised,
+          reason: "appended /apply to job listing URL",
+        });
+        return normalised;
+      }
+      return url;
+    };
+    const atsUrl = normaliseUrl(ctx.atsUrl);
+
     // ── Step 1: Navigate ────────────────────────────────────────────────────
     await ctx.onStepStart("navigate");
     try {
       // Navigate to the direct application URL — Workday apply links end in /apply
       // or go through an intermediary job-posting page. Both are handled.
-      await page.goto(ctx.atsUrl, { waitUntil: "domcontentloaded" });
+      await page.goto(atsUrl, { waitUntil: "domcontentloaded" });
 
       // Workday SPA needs time to hydrate after initial DOM load
       await this._waitForWorkdayApp(page);
