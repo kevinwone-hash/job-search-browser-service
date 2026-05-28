@@ -41,6 +41,47 @@ import type { Page } from "playwright-core";
 const ingestClient = new DiscoveryIngestClient();
 
 // ---------------------------------------------------------------------------
+// Diagnostic result store (in-memory, last run only)
+// ---------------------------------------------------------------------------
+
+export interface DiagnosticPageState {
+  currentUrl: string;
+  pageTitle: string;
+  bodyText: string;
+  jsonLdCount: number;
+  jsonLdTypes: string[];
+  cardSelectors: Record<string, number>;
+  iframeCount: number;
+  shadowRootCount: number;
+  interstitialHints: string[];
+  totalElements: number;
+}
+
+export interface DiagnosticQueryRecord {
+  query: string;
+  pageState: DiagnosticPageState | null;
+  jobsSeen: number;
+  jobsTitleMatched: number;
+  errors: string[];
+}
+
+export interface DiagnosticStore {
+  runId: string;
+  sessionId: string;
+  replayUrl: string;
+  startedAt: string;
+  completedAt: string | null;
+  queries: DiagnosticQueryRecord[];
+}
+
+let _lastDiagnostic: DiagnosticStore | null = null;
+
+/** Returns the in-memory result of the most recent diagnostic run, or null. */
+export function getLastDiagnostic(): DiagnosticStore | null {
+  return _lastDiagnostic;
+}
+
+// ---------------------------------------------------------------------------
 // Public entry point
 // ---------------------------------------------------------------------------
 
@@ -85,11 +126,24 @@ export async function runDiscovery(
     const { page, sessionId } = session;
 
     // Log Browserbase session for replay/screenshot access in dashboard
+    const replayUrl = `https://www.browserbase.com/sessions/${sessionId}`;
     logger.info("discovery_browserbase_session", {
       run_id: runId,
       session_id: sessionId,
-      replay_url: `https://www.browserbase.com/sessions/${sessionId}`,
+      replay_url: replayUrl,
     });
+
+    // Initialise diagnostic store for this run
+    if (isDiagnostic) {
+      _lastDiagnostic = {
+        runId,
+        sessionId,
+        replayUrl,
+        startedAt,
+        completedAt: null,
+        queries: [],
+      };
+    }
 
     for (let i = 0; i < queries.length; i++) {
       const query = queries[i];
@@ -99,8 +153,19 @@ export async function runDiscovery(
         await page.waitForTimeout(MIN_INTER_QUERY_DELAY_MS);
       }
 
-      const result = await _runQuery(page, query, runId, isDiagnostic);
+      const { result, pageState } = await _runQuery(page, query, runId, isDiagnostic);
       queryResults.push(result);
+
+      // Store per-query diagnostic data
+      if (isDiagnostic && _lastDiagnostic) {
+        _lastDiagnostic.queries.push({
+          query,
+          pageState: pageState ?? null,
+          jobsSeen: result.jobsSeen,
+          jobsTitleMatched: result.jobsTitleMatched,
+          errors: result.errors,
+        });
+      }
 
       logger.info("discovery_query_complete", {
         run_id: runId,
@@ -143,9 +208,16 @@ export async function runDiscovery(
     duration_ms: Date.now() - new Date(startedAt).getTime(),
   });
 
-  // Diagnostic runs skip ingest + state writes — logs are the sole output
+  // Diagnostic runs skip ingest + state writes — result stored in _lastDiagnostic
   if (isDiagnostic) {
-    logger.info("discovery_diagnostic_complete_skipping_ingest", { run_id: runId });
+    if (_lastDiagnostic) {
+      _lastDiagnostic.completedAt = completedAt;
+    }
+    logger.info("discovery_diagnostic_complete", {
+      run_id: runId,
+      total_seen: record.totalJobsSeen,
+      result_available_at: "GET /discovery/last-diagnostic",
+    });
     return record;
   }
 
@@ -184,7 +256,7 @@ async function _runQuery(
   query: string,
   runId: string,
   isDiagnostic: boolean = false,
-): Promise<DiscoveryQueryResult> {
+): Promise<{ result: DiscoveryQueryResult; pageState: DiagnosticPageState | null }> {
   const result: DiscoveryQueryResult = {
     query,
     jobsSeen: 0,
@@ -193,6 +265,7 @@ async function _runQuery(
     matchedJobs: [],
     errors: [],
   };
+  let pageState: DiagnosticPageState | null = null;
 
   try {
     // Navigate to Google Jobs SERP
@@ -219,9 +292,9 @@ async function _runQuery(
       });
     }
 
-    // Diagnostic: log page state to determine extraction failure root cause
+    // Diagnostic: capture + log page state to determine extraction failure root cause
     if (isDiagnostic) {
-      await _logPageDiagnostics(page, query, runId);
+      pageState = await _logPageDiagnostics(page, query, runId);
     }
 
     // --- Primary: JSON-LD extraction ---
@@ -272,7 +345,7 @@ async function _runQuery(
     // Non-fatal — caller continues to next query
   }
 
-  return result;
+  return { result, pageState };
 }
 
 // ---------------------------------------------------------------------------
@@ -500,7 +573,11 @@ async function _extractFromDom(page: Page, query: string): Promise<DiscoveredJob
  *   - Iframe count + any shadow roots on body children (detect SPA containment patterns)
  *   - Any element with text "consent", "cookie", "verify", "captcha" (detect interstitials)
  */
-async function _logPageDiagnostics(page: Page, query: string, runId: string): Promise<void> {
+async function _logPageDiagnostics(
+  page: Page,
+  query: string,
+  runId: string,
+): Promise<DiagnosticPageState | null> {
   try {
     const diag = await page.evaluate(() => {
       // Current URL and title
@@ -585,12 +662,15 @@ async function _logPageDiagnostics(page: Page, query: string, runId: string): Pr
       interstitial_hints: diag.interstitialHints,
       total_elements: diag.totalElements,
     });
+
+    return diag as DiagnosticPageState;
   } catch (err) {
     logger.warn("discovery_query_diagnostic_failed", {
       run_id: runId,
       query,
       error: err instanceof Error ? err.message : String(err),
     });
+    return null;
   }
 }
 

@@ -20,7 +20,7 @@ import { config } from "./config.js";
 import { logger } from "./logger.js";
 import { runSession, isSessionActive } from "./runner.js";
 import { adapterRegistry } from "./adapters/registry.js";
-import { runDiscovery } from "./discovery/google-jobs-runner.js";
+import { runDiscovery, getLastDiagnostic } from "./discovery/google-jobs-runner.js";
 import type { RunResponse } from "./types.js";
 import type { DiscoveryRunResponse } from "./discovery/types.js";
 
@@ -130,6 +130,17 @@ let activeDiscoveryRun = false;
 
 app.get("/discovery/status", (_req: Request, res: Response) => {
   res.json({ active: activeDiscoveryRun });
+});
+
+// Returns the in-memory result of the most recent diagnostic run (public).
+// null if no diagnostic run has been executed since last deploy.
+app.get("/discovery/last-diagnostic", (_req: Request, res: Response) => {
+  const result = getLastDiagnostic();
+  if (!result) {
+    res.status(404).json({ error: "No diagnostic run has been executed since last deploy." });
+    return;
+  }
+  res.json(result);
 });
 
 const DiscoveryRunRequestSchema = z.object({
