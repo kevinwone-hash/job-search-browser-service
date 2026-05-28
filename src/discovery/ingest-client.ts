@@ -75,7 +75,7 @@ export class DiscoveryIngestClient {
     });
 
     const res = await this.http.post<DiscoveryIngestResult>(
-      "/ingest/discovery",
+      "/api/v1/ingest/discovery",
       payload,
     );
 
@@ -138,14 +138,15 @@ export class DiscoveryIngestClient {
       },
     ];
 
-    // Fire all 3 upserts in parallel — non-fatal if they fail
+    // Fire all 3 upserts in parallel — non-fatal if they fail.
+    // Endpoint: PUT /api/v1/platform/state/{key} — key is path param, not body field.
     await Promise.allSettled(
-      keys.map((k) =>
+      keys.map(({ key, ...body }) =>
         this.http
-          .post("/api/v1/platform-state", k)
+          .put(`/api/v1/platform/state/${encodeURIComponent(key)}`, body)
           .catch((err: unknown) => {
             logger.warn("discovery_state_write_failed", {
-              key: k.key,
+              key,
               error: String(err),
             });
           }),
