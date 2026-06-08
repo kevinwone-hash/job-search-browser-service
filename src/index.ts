@@ -21,6 +21,7 @@ import { logger } from "./logger.js";
 import { runSession, isSessionActive } from "./runner.js";
 import { adapterRegistry } from "./adapters/registry.js";
 import { runDiscovery, getLastDiagnostic } from "./discovery/google-jobs-runner.js";
+import { fetchJdRendered } from "./jd-fetch.js";
 import type { RunResponse } from "./types.js";
 import type { DiscoveryRunResponse } from "./discovery/types.js";
 
@@ -115,6 +116,35 @@ app.post("/run", requireApiKey, (req: Request, res: Response) => {
     message: "Browser session started. Monitor progress via the workflow API.",
   };
   res.status(202).json(response);
+});
+
+// ── JD fetch — Playwright-rendered extraction (Extraction Reliability Sprint) ──
+//
+// Synchronous endpoint: FastAPI waits for the result to continue extraction.
+// Used as fallback when httpx returns insufficient content for React SPAs.
+// Authentication required — called only by job-search-os extraction pipeline.
+
+const JdFetchRequestSchema = z.object({
+  url: z.string().url(),
+});
+
+app.post("/jd/fetch", requireApiKey, async (req: Request, res: Response) => {
+  const parsed = JdFetchRequestSchema.safeParse(req.body);
+  if (!parsed.success) {
+    res.status(422).json({
+      ok: false,
+      error: "url is required and must be a valid URL",
+      method: "playwright_render",
+    });
+    return;
+  }
+
+  const { url } = parsed.data;
+  logger.info("jd_fetch_request", { url: url.slice(0, 80) });
+
+  const result = await fetchJdRendered(url);
+  const statusCode = result.ok ? 200 : 502;
+  res.status(statusCode).json(result);
 });
 
 // ── Google Jobs discovery (Decision 44) ───────────────────────────────────
